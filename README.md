@@ -8,8 +8,6 @@ TUI tool for merging PDFs. Browse folders, select files, merge.
 cargo install --path .
 ```
 
-Requires [Ghostscript](https://www.ghostscript.com/) (`gs`) on your PATH.
-
 ## Usage
 
 ```bash
