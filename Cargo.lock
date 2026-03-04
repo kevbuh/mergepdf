@@ -887,6 +887,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mergepdf"
+version = "0.1.0"
+dependencies = [
+ "crossterm",
+ "lopdf",
+ "ratatui",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1028,15 +1037,6 @@ dependencies = [
  "redox_syscall",
  "smallvec",
  "windows-link",
-]
-
-[[package]]
-name = "pdf-merge"
-version = "0.1.0"
-dependencies = [
- "crossterm",
- "lopdf",
- "ratatui",
 ]
 
 [[package]]

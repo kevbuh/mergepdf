@@ -279,7 +279,11 @@ impl App {
                 if let Some(ref r) = *guard {
                     match r {
                         Ok(page_count) => {
-                            let file_count: usize = self.message.parse().unwrap_or(0);
+                            let file_count = self
+                                .selected
+                                .iter()
+                                .filter(|&&s| s)
+                                .count();
                             self.message = format!(
                                 "Merged {} pages from {} files into '{}'",
                                 page_count, file_count, self.output_input
@@ -297,6 +301,22 @@ impl App {
     }
 }
 
+fn find_merge_backend() -> &'static str {
+    // Prefer pdfunite (structural merge, much faster) over gs (re-encodes)
+    for cmd in &["pdfunite", "gs"] {
+        if std::process::Command::new(cmd)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return cmd;
+        }
+    }
+    "gs"
+}
+
 fn merge_pdfs(
     files: &[PathBuf],
     output: &PathBuf,
@@ -306,8 +326,14 @@ fn merge_pdfs(
         return Err("No files to merge".into());
     }
 
+    let total = files.len();
+    {
+        let mut p = progress.lock().unwrap();
+        p.total = total;
+        p.current = 0;
+    }
+
     if files.len() == 1 {
-        // Just copy the single file
         let name = files[0].file_name().unwrap().to_string_lossy().to_string();
         {
             let mut p = progress.lock().unwrap();
@@ -319,63 +345,61 @@ fn merge_pdfs(
         return Ok(doc.get_pages().len() as u32);
     }
 
-    // Merge incrementally: start with first two files, then add one at a time
-    let tmp_dir = std::env::temp_dir().join("pdf-merge-tmp");
-    std::fs::create_dir_all(&tmp_dir)?;
+    let backend = find_merge_backend();
 
-    let tmp_a = tmp_dir.join("merge_a.pdf");
-    let tmp_b = tmp_dir.join("merge_b.pdf");
+    // Update progress with file names as we prepare
+    for (i, file) in files.iter().enumerate() {
+        let mut p = progress.lock().unwrap();
+        p.current = i;
+        p.current_file = file.file_name().unwrap().to_string_lossy().to_string();
+    }
 
-    // First file
     {
         let mut p = progress.lock().unwrap();
-        p.current = 1;
-        p.current_file = files[0].file_name().unwrap().to_string_lossy().to_string();
-    }
-    std::fs::copy(&files[0], &tmp_a)?;
-
-    for (i, file) in files[1..].iter().enumerate() {
-        {
-            let mut p = progress.lock().unwrap();
-            p.current = i + 2;
-            p.current_file = file.file_name().unwrap().to_string_lossy().to_string();
-        }
-
-        let out_target = if i == files.len() - 2 {
-            // Last iteration, write directly to output
-            output.clone()
-        } else {
-            tmp_b.clone()
-        };
-
-        let result = std::process::Command::new("gs")
-            .args([
-                "-dBATCH",
-                "-dNOPAUSE",
-                "-q",
-                "-sDEVICE=pdfwrite",
-                &format!("-sOutputFile={}", out_target.display()),
-            ])
-            .arg(&tmp_a)
-            .arg(file)
-            .output()?;
-
-        if !result.status.success() {
-            let _ = std::fs::remove_dir_all(&tmp_dir);
-            let stderr = String::from_utf8_lossy(&result.stderr);
-            return Err(format!("Ghostscript failed: {}", stderr).into());
-        }
-
-        // Move result to tmp_a for next iteration
-        if i < files.len() - 2 {
-            std::fs::rename(&tmp_b, &tmp_a)?;
-        }
+        p.current_file = format!("Merging with {}...", backend);
     }
 
-    let _ = std::fs::remove_dir_all(&tmp_dir);
+    let result = if backend == "pdfunite" {
+        // pdfunite input1.pdf input2.pdf ... output.pdf
+        let mut args: Vec<String> = files.iter().map(|f| f.to_string_lossy().to_string()).collect();
+        args.push(output.to_string_lossy().to_string());
+        std::process::Command::new("pdfunite").args(&args).output()?
+    } else {
+        // gs -dBATCH -dNOPAUSE -q -sDEVICE=pdfwrite -sOutputFile=out input1 input2 ...
+        let mut args = vec![
+            "-dBATCH".to_string(),
+            "-dNOPAUSE".to_string(),
+            "-q".to_string(),
+            "-sDEVICE=pdfwrite".to_string(),
+            format!("-sOutputFile={}", output.display()),
+        ];
+        for file in files {
+            args.push(file.to_string_lossy().to_string());
+        }
+        std::process::Command::new("gs").args(&args).output()?
+    };
+
+    if !result.status.success() {
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        return Err(format!("{} failed: {}", backend, stderr).into());
+    }
+
+    {
+        let mut p = progress.lock().unwrap();
+        p.current = total;
+        p.current_file = "Counting pages...".to_string();
+    }
 
     let doc = lopdf::Document::load(output)?;
-    Ok(doc.get_pages().len() as u32)
+    let page_count = doc.get_pages().len() as u32;
+
+    {
+        let mut p = progress.lock().unwrap();
+        p.current = total;
+        p.current_file = "Done!".to_string();
+    }
+
+    Ok(page_count)
 }
 
 fn scroll_cursor(cursor: usize, scroll: &mut usize, visible: usize) {
